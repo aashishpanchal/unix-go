@@ -18,7 +18,9 @@ A complete architectural and operational guide explaining how TCP establishes co
    - [Application-Layer Heartbeats (Ping/Pong)](#application-layer-heartbeats-pingpong)
 8. [The Two Generals' Problem & The Telephone Analogy](#8-the-two-generals-problem--the-telephone-analogy)
 9. [TCP State Machine Reference](#9-tcp-state-machine-reference)
-10. [Interview Q&A Cheat Sheet](#10-interview-qa-cheat-sheet)
+10. [RTT (Round Trip Time) & Dynamic Latency Adaptation](#10-rtt-round-trip-time--dynamic-latency-adaptation)
+11. [RFC (Request for Comments) — The Internet's Rulebook](#11-rfc-request-for-comments--the-internets-rulebook)
+12. [Interview Q&A Cheat Sheet](#12-interview-qa-cheat-sheet)
 
 ---
 
@@ -300,13 +302,77 @@ stateDiagram-v2
 
 ---
 
-## 10. Interview Q&A Cheat Sheet
+## 10. RTT (Round Trip Time) & Dynamic Latency Adaptation
 
-| Question                                                             | Crisp Interview Answer                                                                                                                                                                      |
-| :------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **What is a Half-Open Connection?**                                  | A state where one side has closed or crashed, but the remote side still believes the connection is valid and `ESTABLISHED`.                                                                 |
-| **What triggers a TCP `RST` packet?**                                | Arrival of a packet for a port or sequence number that does not match any active TCP socket in the OS table.                                                                                |
-| **Why is `TIME_WAIT` 2 MSL?**                                        | Maximum Segment Lifetime (MSL) is the max time a packet can survive in the network. $2 \times \text{MSL}$ guarantees both the final ACK and any retransmitted FIN have cleared the network. |
-| **Why is 3-Way Handshake used instead of 2-Way?**                    | Both sides must independently establish and acknowledge their starting sequence numbers to prevent delayed duplicate packets from causing phantom connections.                              |
-| **Difference between `broken pipe` and `connection reset by peer`?** | `connection reset by peer`: You attempted to read from or wrote to a socket after the remote peer closed it with `RST`. `broken pipe`: You wrote data to a socket after receiving a `RST`.  |
-| **How do you detect a dead TCP connection without sending data?**    | Via OS-level `SO_KEEPALIVE` probes, or application-level periodic Ping/Pong heartbeats with a timeout.                                                                                      |
+### What is RTT?
+**RTT (Round Trip Time)** is the total time (in milliseconds) it takes for a data packet to travel from the sender to the receiver **plus** the time it takes for the acknowledgment (`ACK`) or response to return to the sender:
+
+$$\text{RTT} = T_{\text{outbound}} + T_{\text{inbound}}$$
+
+When you run `ping google.com`, the `time=24.2 ms` displayed in your terminal is precisely the RTT.
+
+### Why Does RTT Change Constantly? (Is RTT Fixed?)
+**No, RTT is never fixed.** It dynamically fluctuates due to:
+1. **Queuing Delay (Bufferbloat / Traffic Congestion)**: Intermediate routers hold incoming packets in memory queues during peak traffic. If a router is congested, packets wait in queue longer before transmission.
+2. **Bandwidth Drops (Transmission Delay)**: When moving to a slower network (e.g. 5G to 3G), pushing packet bits onto the physical medium takes longer.
+3. **BGP Rerouting (Propagation Delay)**: If an ISP reroutes traffic along an alternate path (e.g. due to fiber cuts), physical distance increases, increasing latency.
+4. **Jitter**: The rapid millisecond-to-millisecond variation in RTT is called **Jitter**.
+
+### How TCP Handles Dynamic RTT (Jacobson's Algorithm)
+If RTT is constantly shifting, how does TCP know whether a missing ACK is caused by a lost packet or just network lag? Hardcoding a fixed timeout would either cause premature duplicate retransmissions or slow recovery.
+
+TCP solves this by **dynamically adjusting its Retransmission Timeout (RTO)** using **Jacobson's Algorithm**:
+
+1. **Measure Every Packet (`SampleRTT`)**:
+   TCP times the exact round-trip for transmitted packets and their incoming ACKs.
+2. **Compute an Exponential Moving Average (SRTT - Smoothed RTT)**:
+   TCP does not overreact to a single spike. It maintains a running smoothed average:
+   $$\text{SRTT} \leftarrow (1 - \alpha) \cdot \text{SRTT} + \alpha \cdot \text{SampleRTT} \quad (\text{typically } \alpha = 0.125)$$
+3. **Compute RTT Variance (`RTTVAR` / Jitter)**:
+   $$\text{RTTVAR} \leftarrow (1 - \beta) \cdot \text{RTTVAR} + \beta \cdot |\text{SRTT} - \text{SampleRTT}| \quad (\text{typically } \beta = 0.25)$$
+4. **Dynamically Set RTO (Retransmission Timeout)**:
+   $$\text{RTO} = \text{SRTT} + \max(G, 4 \times \text{RTTVAR})$$
+   *(where $G$ is the clock granularity)*.
+
+* **Result**: When your network is fast (RTT = 20ms), TCP resends lost packets after ~50ms. When your network slows down (RTT = 200ms), TCP raises its timeout to ~400ms automatically to prevent choking the network with redundant duplicates.
+
+---
+
+## 11. RFC (Request for Comments) — The Internet's Rulebook
+
+### What is an RFC?
+An **RFC (Request for Comments)** is the official, authoritative technical document published by the **IETF (Internet Engineering Task Force)** that defines the standards, protocols, and operational procedures of the global Internet.
+
+### Why Such a Humble Name? (Historical Origin)
+In 1969, during the early development of ARPANET (the precursor to the Internet), Steve Crocker and fellow young computer scientists began writing technical proposals.
+* They wanted to avoid sounding authoritarian or dogmatic.
+* They titled their working notes **"Request for Comments"** to invite constructive peer feedback and debate.
+* The humble title stuck, and today every foundational Internet standard remains an "RFC".
+
+### Core Rules of RFCs:
+1. **Numbered and Immutable**: Once an RFC is assigned a number (e.g. RFC 793), it is **never edited or modified**. If changes are required, a new RFC is published that marks the older one as *Obsoleted* or *Updated*.
+2. **Vendor Neutrality**: Any company (Google, Apple, Microsoft, Linux kernel) implementing TCP or HTTP must follow the exact rules defined in the corresponding RFC to ensure global interoperability.
+
+### Essential RFCs Every Engineer Should Know:
+* **RFC 793 / RFC 9293**: **TCP Specification** (defines the 3-way handshake, flags, state machine, and reliability algorithms).
+* **RFC 9110 / RFC 7230**: **HTTP Semantics and Protocols** (HTTP/1.1 and modern HTTP standards).
+* **RFC 1918**: **Private IPv4 Address Spaces** (allocates `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16` for internal private networks).
+* **RFC 6455**: **The WebSocket Protocol** (full-duplex client-server web communications).
+* **RFC 1149 (Humorous)**: *"A Standard for the Transmission of IP Datagrams on Avian Carriers"* — An April Fools' Day RFC specifying how to route IP packets using homing pigeons.
+
+---
+
+## 12. Interview Q&A Cheat Sheet
+
+| Question | Crisp Interview Answer |
+| :--- | :--- |
+| **What is RTT (Round Trip Time)?** | The total latency for a packet to reach its destination plus the time for its ACK to return to the sender. |
+| **Is RTT fixed? Why does it change?** | No, RTT is dynamic. It changes constantly due to queuing delays (bufferbloat), bandwidth fluctuations, and routing path changes. |
+| **How does TCP calculate RTO?** | TCP uses Jacobson's algorithm to compute Smoothed RTT (SRTT) and RTT Variance (RTTVAR), dynamically calculating $\text{RTO} = \text{SRTT} + 4 \times \text{RTTVAR}$. |
+| **What is an RFC?** | An official technical publication by the IETF that defines standard protocols and specifications for the Internet (e.g., RFC 9293 for TCP). |
+| **What is a Half-Open Connection?** | A state where one side has closed or crashed, but the remote side still believes the connection is valid and `ESTABLISHED`. |
+| **What triggers a TCP `RST` packet?** | Arrival of a packet for a port or sequence number that does not match any active TCP socket in the OS table. |
+| **Why is `TIME_WAIT` 2 MSL?** | Maximum Segment Lifetime (MSL) is the max time a packet can survive in the network. $2 \times \text{MSL}$ guarantees both the final ACK and any retransmitted FIN have cleared the network. |
+| **Why is 3-Way Handshake used instead of 2-Way?** | Both sides must independently establish and acknowledge their starting sequence numbers to prevent delayed duplicate packets from causing phantom connections. |
+| **Difference between `broken pipe` and `connection reset by peer`?** | `connection reset by peer`: You attempted to read from or wrote to a socket after the remote peer closed it with `RST`. `broken pipe`: You wrote data to a socket after receiving a `RST`. |
+| **How do you detect a dead TCP connection without sending data?** | Via OS-level `SO_KEEPALIVE` probes, or application-level periodic Ping/Pong heartbeats with a timeout. |
